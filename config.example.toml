@@ -1,0 +1,24 @@
+[[question]]
+text = "What is the capital of France?"
+options = ["London", "Paris", "Berlin", "Madrid"]
+correct = [1]
+
+[[question]]
+text = "What is 2+2?"
+options = ["3", "4", "5", "6"]
+correct = [1]
+
+[[question]]
+text = "Which planet is known as the Red Planet?"
+options = ["Venus", "Jupiter", "Mars", "Saturn"]
+correct = [2]
+
+[[question]]
+text = "What is the largest ocean on Earth?"
+options = ["Atlantic", "Indian", "Arctic", "Pacific"]
+correct = [3]
+
+[[question]]
+text = "Which are programming languages?"
+options = ["Python", "HTML", "Rust", "CSS", "JavaScript"]
+correct = [0, 2, 4]

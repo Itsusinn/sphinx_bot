@@ -5,5 +5,12 @@ compatibility_date = "2024-04-24"
 [build]
 command = "cargo install worker-build && worker-build --release"
 
-# [vars]
-# TELEGRAM_BOT_TOKEN = "your-token-here"
+[[kv_namespaces]]
+binding = "WAIT_AUTH_KV"
+id = "fad766e0ebce4439974d64c5e1cc6b5b"
+
+[vars]
+
+
+[observability]
+logs = { enabled = true, invocation_logs = true }
