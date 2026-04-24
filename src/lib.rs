@@ -6,7 +6,7 @@ use turingram::client::{Client, worker_0_8::Executor};
 use turingram::methods::{AnswerCallbackQuery, SendMessage};
 use turingram::types::{
     ChatType, InlineKeyboardButton, InlineKeyboardButtonKind, MessageKind, ReplyMarkup, True,
-    Update, UpdateKind,
+    Update, UpdateKind, ParseMode,
 };
 use worker::*;
 
@@ -93,6 +93,19 @@ struct BanChatMember {
 impl turingram::methods::Method for BanChatMember {
     type Response = True;
     const NAME: &str = "banChatMember";
+}
+
+#[derive(Debug, Serialize)]
+struct UnbanChatMember {
+    chat_id: i64,
+    user_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    only_if_banned: Option<bool>,
+}
+
+impl turingram::methods::Method for UnbanChatMember {
+    type Response = True;
+    const NAME: &str = "unbanChatMember";
 }
 
 #[derive(Debug, Serialize)]
@@ -286,6 +299,79 @@ async fn handle_text(
             "/verify" => handle_verify(bot, chat_id, kv, bot_username).await,
             "/chatid" => handle_chatid(bot, chat_id).await,
             "/status" => handle_status(bot, chat_id, kv).await,
+            "/unban" => {
+                if chat_id > 0 {
+                    let _ = bot
+                        .execute(SendMessage {
+                            chat_id,
+                            text: "❌ 请在群组内使用此命令。".to_string(),
+                            parse_mode: None,
+                            entities: None,
+                            reply_parameters: None,
+                            reply_markup: None,
+                        })
+                        .await;
+                    return;
+                }
+
+                let sender_id = match from_id {
+                    Some(id) => id,
+                    None => return,
+                };
+
+                let is_admin = match bot.execute(GetChatMember { chat_id, user_id: sender_id }).await {
+                    Ok(member) => {
+                        let status = member.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                        status == "administrator" || status == "creator"
+                    }
+                    Err(_) => false,
+                };
+
+                if !is_admin {
+                    let _ = bot
+                        .execute(SendMessage {
+                            chat_id,
+                            text: "❌ 只有管理员可以使用此命令。".to_string(),
+                            parse_mode: None,
+                            entities: None,
+                            reply_parameters: None,
+                            reply_markup: None,
+                        })
+                        .await;
+                    return;
+                }
+
+                if let Some(target_id) = parts.get(1).and_then(|s| s.parse::<i64>().ok()) {
+                    let _ = bot
+                        .execute(UnbanChatMember {
+                            chat_id,
+                            user_id: target_id,
+                            only_if_banned: Some(true),
+                        })
+                        .await;
+                    let _ = bot
+                        .execute(SendMessage {
+                            chat_id,
+                            text: format!("✅ 已解除对用户 {} 的封禁。他们现在可以重新加入群组。", target_id),
+                            parse_mode: None,
+                            entities: None,
+                            reply_parameters: None,
+                            reply_markup: None,
+                        })
+                        .await;
+                } else {
+                    let _ = bot
+                        .execute(SendMessage {
+                            chat_id,
+                            text: "⚠️ 请提供要解封的用户 ID，例如：/unban 123456789".to_string(),
+                            parse_mode: None,
+                            entities: None,
+                            reply_parameters: None,
+                            reply_markup: None,
+                        })
+                        .await;
+                }
+            }
             _ => {
                 let _ = bot
                     .execute(SendMessage {
@@ -483,7 +569,7 @@ async fn handle_callback(
     };
 
     let parts: Vec<&str> = data.split(':').collect();
-    if parts.len() < 2 || (parts[0] != "verify" && parts[0] != "answer") {
+    if parts.len() < 2 || (parts[0] != "verify" && parts[0] != "answer" && parts[0] != "unban") {
         return;
     }
 
@@ -558,6 +644,29 @@ async fn handle_callback(
                         reply_markup: None,
                     })
                     .await;
+
+                // Notify group about the wrong answer, with an unban button
+                let unban_btn = InlineKeyboardButton {
+                    text: format!("🔓 解封用户 {}", user_id),
+                    kind: InlineKeyboardButtonKind::CallbackData {
+                        callback_data: format!("unban:{}:{}", group_id, user_id),
+                    },
+                };
+                let _ = bot
+                    .execute(SendMessage {
+                        chat_id: group_id,
+                        text: format!(
+                            "❌ 用户 <a href=\"tg://user?id={}\">{}</a> 验证回答错误，已被移出群组并封禁一周。",
+                            user_id, user_id
+                        ),
+                        parse_mode: Some(ParseMode::Html),
+                        entities: None,
+                        reply_parameters: None,
+                        reply_markup: Some(ReplyMarkup::InlineKeyboard {
+                            inline_keyboard: vec![vec![unban_btn]],
+                        }),
+                    })
+                    .await;
             }
         }
         return;
@@ -567,6 +676,70 @@ async fn handle_callback(
         Ok(id) => id,
         Err(_) => return,
     };
+
+    //
+    // unban:{group_id}:{target_id} — admin clicked unban button
+    //
+    if parts[0] == "unban" {
+        if parts.len() != 3 {
+            return;
+        }
+        let target_id: i64 = match parts[2].parse() {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+
+        let is_admin = match bot.execute(GetChatMember { chat_id: group_id, user_id }).await {
+            Ok(member) => {
+                let status = member.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                status == "administrator" || status == "creator"
+            }
+            Err(_) => false,
+        };
+
+        if !is_admin {
+            let _ = bot
+                .execute(AnswerCallbackQuery {
+                    callback_query_id: query.id.clone(),
+                    text: Some("❌ 只有管理员可以执行此操作。".to_string()),
+                    show_alert: true,
+                })
+                .await;
+            return;
+        }
+
+        let _ = bot
+            .execute(UnbanChatMember {
+                chat_id: group_id,
+                user_id: target_id,
+                only_if_banned: Some(true),
+            })
+            .await;
+
+        let _ = bot
+            .execute(AnswerCallbackQuery {
+                callback_query_id: query.id.clone(),
+                text: Some(format!("✅ 已解除对用户 {} 的封禁。", target_id)),
+                show_alert: true,
+            })
+            .await;
+
+        let _ = bot
+            .execute(SendMessage {
+                chat_id: group_id,
+                text: format!(
+                    "✅ 管理员已解除对用户 <a href=\"tg://user?id={}\">{}</a> 的封禁。",
+                    target_id, target_id
+                ),
+                parse_mode: Some(ParseMode::Html),
+                entities: None,
+                reply_parameters: None,
+                reply_markup: None,
+            })
+            .await;
+
+        return;
+    }
 
     //
     // verify:{group_id} — button clicked in group, redirect to private chat
@@ -639,20 +812,24 @@ async fn handle_start(
     if let Some(payload) = payload {
         if let Some(group_id_str) = payload.strip_prefix("verify_") {
             if let Ok(group_id) = group_id_str.parse::<i64>() {
-                // Check membership via Telegram API instead of KV
-                let is_member = match bot
+                // Check membership and tag via Telegram API instead of KV
+                let mut needs_verify = false;
+                let mut is_member = false;
+                
+                if let Ok(v) = bot
                     .execute(GetChatMember {
                         chat_id: group_id,
                         user_id: chat_id,
                     })
                     .await
                 {
-                    Ok(v) => {
-                        let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                        status != "left" && status != "kicked"
-                    }
-                    Err(_) => false,
-                };
+                    let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                    is_member = status != "left" && status != "kicked";
+                    
+                    let tag = v.get("tag").and_then(|t| t.as_str()).unwrap_or("");
+                    needs_verify = tag == "suspending";
+                }
+
                 if !is_member {
                     let _ = bot
                         .execute(SendMessage {
@@ -660,6 +837,21 @@ async fn handle_start(
                             text:
                                 "⏳ 没有待处理的验证请求。\n\n请先加入群组，然后重新点击验证按钮。"
                                     .to_string(),
+                            parse_mode: None,
+                            entities: None,
+                            reply_parameters: None,
+                            reply_markup: None,
+                        })
+                        .await;
+                    return;
+                }
+
+                if !needs_verify {
+                    let _ = bot
+                        .execute(SendMessage {
+                            chat_id,
+                            text: "✅ 你已完成验证或无需验证。\n\nYou do not need verification or have already been verified."
+                                .to_string(),
                             parse_mode: None,
                             entities: None,
                             reply_parameters: None,
