@@ -14,4 +14,4 @@ BOT_USERNAME = "wit_sphinx_bot"
 
 
 [observability]
-logs = { enabled = true, invocation_logs = true }
+logs = { enabled = false, invocation_logs = false }
