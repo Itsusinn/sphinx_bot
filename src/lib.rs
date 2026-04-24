@@ -6,8 +6,8 @@ use turingram::client::Error as TgramError;
 use turingram::client::{Client, worker_0_8::Executor};
 use turingram::methods::{AnswerCallbackQuery, SendMessage};
 use turingram::types::{
-    InlineKeyboardButton, InlineKeyboardButtonKind, MessageKind, ParseMode, ReplyMarkup,
-    True, Update, UpdateKind,
+    InlineKeyboardButton, InlineKeyboardButtonKind, MessageKind, ParseMode, ReplyMarkup, True,
+    Update, UpdateKind,
 };
 use worker::*;
 
@@ -139,10 +139,7 @@ fn load_questions() -> Vec<QuestionItem> {
     config.question
 }
 
-fn pick_question<'a>(
-    questions: &'a [QuestionItem],
-    user_id: i64,
-) -> Option<(usize, &'a QuestionItem)> {
+fn pick_question(questions: &[QuestionItem], user_id: i64) -> Option<(usize, &QuestionItem)> {
     if questions.is_empty() {
         return None;
     }
@@ -264,30 +261,29 @@ async fn handle_text(
     bot_username: &str,
 ) -> Result<()> {
     // If in a monitored group and sender is suspended, delete message and remove user
-    if groups.contains(&chat_id) {
-        if let Some(uid) = from_id
-            && let Ok(member) = bot
-                .execute(GetChatMember {
-                    chat_id,
-                    user_id: uid,
-                })
-                .await
-            && member.get("tag").and_then(|t| t.as_str()).unwrap_or("") == "suspending"
-        {
-            bot.execute(DeleteMessage {
-                chat_id,
-                message_id: msg_id,
-            })
-            .await?;
-            let until = Date::now().as_millis() / 1000 + 7 * 24 * 3600;
-            bot.execute(BanChatMember {
+    if groups.contains(&chat_id)
+        && let Some(uid) = from_id
+        && let Ok(member) = bot
+            .execute(GetChatMember {
                 chat_id,
                 user_id: uid,
-                until_date: Some(until),
             })
-            .await?;
-            return Ok(());
-        }
+            .await
+        && member.get("tag").and_then(|t| t.as_str()).unwrap_or("") == "suspending"
+    {
+        bot.execute(DeleteMessage {
+            chat_id,
+            message_id: msg_id,
+        })
+        .await?;
+        let until = Date::now().as_millis() / 1000 + 7 * 24 * 3600;
+        bot.execute(BanChatMember {
+            chat_id,
+            user_id: uid,
+            until_date: Some(until),
+        })
+        .await?;
+        return Ok(());
     }
 
     if text.starts_with('/') {
@@ -465,8 +461,8 @@ async fn handle_service_msg(
         // Expire KV entry after 1 hour (3600 seconds)
         if let Err(e) = kv
             .put(&kv_key, kv_value.as_str())
-            .and_then(|b| Ok(b.expiration_ttl(3600)))
-            .and_then(|b| Ok(b.execute()))
+            .map(|b| b.expiration_ttl(3600))
+            .map(|b| b.execute())
         {
             console_error!("KV put error for {}: {:?}", kv_key, e);
         }
@@ -818,43 +814,44 @@ async fn handle_start(
     bot_username: &str,
 ) -> Result<()> {
     // Handle deep-link verification: /start verify_{group_id}
-    if let Some(payload) = payload {
-        if let Some(group_id_str) = payload.strip_prefix("verify_") {
-            if let Ok(group_id) = group_id_str.parse::<i64>() {
-                // Check membership and tag via Telegram API instead of KV
-                let mut needs_verify = false;
-                let mut is_member = false;
+    if let Some(payload) = payload
+        && let Some(group_id_str) = payload.strip_prefix("verify_")
+        && let Ok(group_id) = group_id_str.parse::<i64>()
+    {
+        // Check membership and tag via Telegram API instead of KV
+        let mut needs_verify = false;
+        let mut is_member = false;
 
-                if let Ok(v) = bot
-                    .execute(GetChatMember {
-                        chat_id: group_id,
-                        user_id: chat_id,
-                    })
-                    .await
-                {
-                    let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                    is_member = status != "left" && status != "kicked";
+        if let Ok(v) = bot
+            .execute(GetChatMember {
+                chat_id: group_id,
+                user_id: chat_id,
+            })
+            .await
+        {
+            let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
+            is_member = status != "left" && status != "kicked";
 
-                    let tag = v.get("tag").and_then(|t| t.as_str()).unwrap_or("");
-                    needs_verify = tag == "suspending";
-                }
+            let tag = v.get("tag").and_then(|t| t.as_str()).unwrap_or("");
+            needs_verify = tag == "suspending";
+        }
 
-                if !is_member {
-                    bot.execute(SendMessage {
-                        chat_id,
-                        text: "⏳ 没有待处理的验证请求。\n\n请先加入群组，然后重新点击验证按钮。"
-                            .to_string(),
-                        parse_mode: None,
-                        entities: None,
-                        reply_parameters: None,
-                        reply_markup: None,
-                    })
-                    .await?;
-                    return Ok(());
-                }
+        if !is_member {
+            bot.execute(SendMessage {
+                chat_id,
+                text: "⏳ 没有待处理的验证请求。\n\n请先加入群组，然后重新点击验证按钮。"
+                    .to_string(),
+                parse_mode: None,
+                entities: None,
+                reply_parameters: None,
+                reply_markup: None,
+            })
+            .await?;
+            return Ok(());
+        }
 
-                if !needs_verify {
-                    bot.execute(SendMessage {
+        if !needs_verify {
+            bot.execute(SendMessage {
                             chat_id,
                             text: "✅ 你已完成验证或无需验证。\n\nYou do not need verification or have already been verified."
                                 .to_string(),
@@ -864,38 +861,38 @@ async fn handle_start(
                             reply_markup: None,
                         })
                         .await?;
-                    return Ok(());
-                }
+            return Ok(());
+        }
 
-                if let Some((q_idx, q)) = pick_question(questions, chat_id) {
-                    // Send verification question
-                    let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
-                    for (i, opt) in q.options.iter().enumerate() {
-                        buttons.push(vec![InlineKeyboardButton {
-                            text: opt.clone(),
-                            kind: InlineKeyboardButtonKind::CallbackData {
-                                callback_data: format!("answer:{}:{}:{}", group_id, q_idx, i),
-                            },
-                        }]);
-                    }
-                    bot.execute(SendMessage {
-                            chat_id,
-                            text: format!(
-                                "请回答以下问题以完成验证：\n\n{}\n\nPlease answer to complete verification:",
-                                q.text
-                            ),
-                            parse_mode: None,
-                            entities: None,
-                            reply_parameters: None,
-                            reply_markup: Some(ReplyMarkup::InlineKeyboard {
-                                inline_keyboard: buttons,
-                            }),
-                        })
-                        .await?;
-                } else {
-                    // No question — verify immediately
-                    verify_user(bot, group_id, chat_id).await?;
-                    bot.execute(SendMessage {
+        if let Some((q_idx, q)) = pick_question(questions, chat_id) {
+            // Send verification question
+            let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+            for (i, opt) in q.options.iter().enumerate() {
+                buttons.push(vec![InlineKeyboardButton {
+                    text: opt.clone(),
+                    kind: InlineKeyboardButtonKind::CallbackData {
+                        callback_data: format!("answer:{}:{}:{}", group_id, q_idx, i),
+                    },
+                }]);
+            }
+            bot.execute(SendMessage {
+                chat_id,
+                text: format!(
+                    "请回答以下问题以完成验证：\n\n{}\n\nPlease answer to complete verification:",
+                    q.text
+                ),
+                parse_mode: None,
+                entities: None,
+                reply_parameters: None,
+                reply_markup: Some(ReplyMarkup::InlineKeyboard {
+                    inline_keyboard: buttons,
+                }),
+            })
+            .await?;
+        } else {
+            // No question — verify immediately
+            verify_user(bot, group_id, chat_id).await?;
+            bot.execute(SendMessage {
                             chat_id,
                             text: "✅ 验证成功！你已在群组中完成身份验证。\n\nVerification successful! You are now verified in the group."
                                 .to_string(),
@@ -905,10 +902,8 @@ async fn handle_start(
                             reply_markup: None,
                         })
                         .await?;
-                }
-                return Ok(());
-            }
         }
+        return Ok(());
     }
 
     // Check for pending verifications
@@ -1001,7 +996,7 @@ async fn handle_verify(
 ) -> Result<()> {
     // Check all wait_auth entries for this user across groups
     // We need to list KV with prefix
-    let prefix = format!("wait_auth:");
+    let prefix = "wait_auth:".to_string();
 
     let list_resp = match kv.list().prefix(prefix.clone()).execute().await {
         Ok(r) => r,
