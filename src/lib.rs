@@ -163,6 +163,11 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         }
     };
 
+    let bot_username = match env.var("BOT_USERNAME") {
+        Ok(v) => v.to_string(),
+        Err(_) => return Response::error("BOT_USERNAME missing", 500),
+    };
+
     let questions = load_questions();
     let bot = Client::new(Executor::new(), token.trim().to_string());
     let mut req = req;
@@ -196,16 +201,18 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                         &kv,
                         &monitored_groups,
                         &questions,
+                        &bot_username,
                     )
                     .await;
                 }
                 MessageKind::Other(raw) => {
-                    handle_service_msg(&bot, chat_id, &raw, &kv, &monitored_groups).await;
+                    handle_service_msg(&bot, chat_id, &raw, &kv, &monitored_groups, &bot_username)
+                        .await;
                 }
             }
         }
         UpdateKind::CallbackQuery(query) => {
-            handle_callback(&bot, &query, &questions).await;
+            handle_callback(&bot, &query, &questions, &bot_username).await;
         }
         _ => {
             console_log!("Other update kind — ignored");
@@ -225,30 +232,34 @@ async fn handle_text(
     kv: &KvStore,
     groups: &HashSet<i64>,
     questions: &[QuestionItem],
+    bot_username: &str,
 ) {
     // If in a monitored group and sender is suspended, delete message and remove user
     if groups.contains(&chat_id) {
-        if let Some(uid) = from_id {
-            let kv_key = format!("wait_auth:{}:{}", chat_id, uid);
-            if let Ok(Some(entry)) = kv.get(&kv_key).text().await {
-                if entry.contains("\"pending\"") {
-                    let _ = bot
-                        .execute(DeleteMessage {
-                            chat_id,
-                            message_id: msg_id,
-                        })
-                        .await;
-                    let until = Date::now().as_millis() / 1000 + 7 * 24 * 3600;
-                    let _ = bot
-                        .execute(BanChatMember {
-                            chat_id,
-                            user_id: uid,
-                            until_date: Some(until),
-                        })
-                        .await;
-                    return;
-                }
-            }
+        if let Some(uid) = from_id
+            && let Ok(member) = bot
+                .execute(GetChatMember {
+                    chat_id,
+                    user_id: uid,
+                })
+                .await
+            && member.get("tag").and_then(|t| t.as_str()).unwrap_or("") == "suspending"
+        {
+            let _ = bot
+                .execute(DeleteMessage {
+                    chat_id,
+                    message_id: msg_id,
+                })
+                .await;
+            let until = Date::now().as_millis() / 1000 + 7 * 24 * 3600;
+            let _ = bot
+                .execute(BanChatMember {
+                    chat_id,
+                    user_id: uid,
+                    until_date: Some(until),
+                })
+                .await;
+            return;
         }
     }
 
@@ -257,7 +268,7 @@ async fn handle_text(
         match parts[0] {
             "/start" => {
                 let payload = parts.get(1).copied();
-                handle_start(bot, chat_id, kv, payload, questions).await;
+                handle_start(bot, chat_id, kv, payload, questions, bot_username).await;
             }
             "/help" => {
                 let _ = bot
@@ -272,7 +283,7 @@ async fn handle_text(
                     })
                     .await;
             }
-            "/verify" => handle_verify(bot, chat_id, kv).await,
+            "/verify" => handle_verify(bot, chat_id, kv, bot_username).await,
             "/chatid" => handle_chatid(bot, chat_id).await,
             "/status" => handle_status(bot, chat_id, kv).await,
             _ => {
@@ -299,6 +310,7 @@ async fn handle_service_msg(
     raw: &Value,
     kv: &KvStore,
     monitored: &HashSet<i64>,
+    bot_username: &str,
 ) {
     if !monitored.contains(&chat_id) {
         return;
@@ -399,7 +411,7 @@ async fn handle_service_msg(
         let button = InlineKeyboardButton {
             text: "🔐 验证身份".to_string(),
             kind: InlineKeyboardButtonKind::Url {
-                url: format!("https://t.me/wit_sphinx_bot?start=verify_{}", chat_id),
+                url: format!("https://t.me/{}?start=verify_{}", bot_username, chat_id),
             },
         };
         let markup = ReplyMarkup::InlineKeyboard {
@@ -463,6 +475,7 @@ async fn handle_callback(
     bot: &Client<Executor>,
     query: &turingram::types::CallbackQuery,
     questions: &[QuestionItem],
+    bot_username: &str,
 ) {
     let data = match &query.data {
         Some(d) => d,
@@ -470,8 +483,7 @@ async fn handle_callback(
     };
 
     let parts: Vec<&str> = data.split(':').collect();
-    if parts.len() < 2 || (parts[0] != "verify" && parts[0] != "verify_pm" && parts[0] != "answer")
-    {
+    if parts.len() < 2 || (parts[0] != "verify" && parts[0] != "answer") {
         return;
     }
 
@@ -557,41 +569,6 @@ async fn handle_callback(
     };
 
     //
-    // verify_pm:{group_id} — button clicked in private chat, do actual verification
-    //
-    if parts[0] == "verify_pm" {
-        let _ = bot
-            .execute(AnswerCallbackQuery {
-                callback_query_id: query.id.clone(),
-                text: Some("⏳ 验证中...".to_string()),
-                show_alert: false,
-            })
-            .await;
-
-        verify_user(bot, group_id, user_id).await;
-        let _ = bot
-            .execute(AnswerCallbackQuery {
-                callback_query_id: query.id.clone(),
-                text: Some("✅ 验证成功！".to_string()),
-                show_alert: true,
-            })
-            .await;
-        let _ = bot
-            .execute(SendMessage {
-                chat_id: user_id,
-                text: "✅ 验证成功！你已在群组中完成身份验证。\n\nVerification successful! You are now verified in the group."
-                    .to_string(),
-                parse_mode: None,
-                entities: None,
-                reply_parameters: None,
-                reply_markup: None,
-            })
-            .await;
-
-        return;
-    }
-
-    //
     // verify:{group_id} — button clicked in group, redirect to private chat
     //
     let _ = bot
@@ -604,8 +581,8 @@ async fn handle_callback(
 
     let pm_button = InlineKeyboardButton {
         text: "✅ 点击验证身份".to_string(),
-        kind: InlineKeyboardButtonKind::CallbackData {
-            callback_data: format!("verify_pm:{}", group_id),
+        kind: InlineKeyboardButtonKind::Url {
+            url: format!("https://t.me/{}?start=verify_{}", bot_username, group_id),
         },
     };
     let pm_markup = ReplyMarkup::InlineKeyboard {
@@ -635,10 +612,10 @@ async fn handle_callback(
             let _ = bot
                 .execute(AnswerCallbackQuery {
                     callback_query_id: query.id.clone(),
-                    text: Some(
-                        "⚠️ 请先私聊 @wit_sphinx_bot 发送 /start，然后重新点击验证按钮。"
-                            .to_string(),
-                    ),
+                    text: Some(format!(
+                        "⚠️ 请先私聊 @{} 发送 /start，然后重新点击验证按钮。",
+                        bot_username
+                    )),
                     show_alert: true,
                 })
                 .await;
@@ -656,6 +633,7 @@ async fn handle_start(
     kv: &KvStore,
     payload: Option<&str>,
     questions: &[QuestionItem],
+    bot_username: &str,
 ) {
     // Handle deep-link verification: /start verify_{group_id}
     if let Some(payload) = payload {
@@ -774,8 +752,8 @@ async fn handle_start(
         if let Some(gid) = parts.get(1) {
             buttons.push(vec![InlineKeyboardButton {
                 text: format!("✅ 验证群组 {}", gid),
-                kind: InlineKeyboardButtonKind::CallbackData {
-                    callback_data: format!("verify_pm:{}", gid),
+                kind: InlineKeyboardButtonKind::Url {
+                    url: format!("https://t.me/{}?start=verify_{}", bot_username, gid),
                 },
             }]);
         }
@@ -820,7 +798,7 @@ async fn handle_chatid(bot: &Client<Executor>, chat_id: i64) {
 }
 
 /// /verify in private chat — check if user has pending verification.
-async fn handle_verify(bot: &Client<Executor>, chat_id: i64, kv: &KvStore) {
+async fn handle_verify(bot: &Client<Executor>, chat_id: i64, kv: &KvStore, bot_username: &str) {
     // Check all wait_auth entries for this user across groups
     // We need to list KV with prefix
     let prefix = format!("wait_auth:");
@@ -870,23 +848,32 @@ async fn handle_verify(bot: &Client<Executor>, chat_id: i64, kv: &KvStore) {
         return;
     }
 
-    // Trigger verification for each pending entry
+    let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
     for key in &pending_entries {
         let parts: Vec<&str> = key.split(':').collect();
-        let group_id: i64 = parts[1].parse().unwrap_or(0);
+        let group_id = parts[1];
 
-        verify_user(bot, group_id, chat_id).await;
-        let _ = bot
-            .execute(SendMessage {
-                chat_id,
-                text: format!("✅ 你已在群组 {} 中完成验证！", group_id),
-                parse_mode: None,
-                entities: None,
-                reply_parameters: None,
-                reply_markup: None,
-            })
-            .await;
+        // Instead of verifying immediately, provide a button to trigger the start flow with questions
+        buttons.push(vec![InlineKeyboardButton {
+            text: format!("✅ 去验证群组 {}", group_id),
+            kind: InlineKeyboardButtonKind::Url {
+                url: format!("https://t.me/{}?start=verify_{}", bot_username, group_id),
+            },
+        }]);
     }
+
+    let _ = bot
+        .execute(SendMessage {
+            chat_id,
+            text: "你有待处理的验证请求，请点击下方按钮进行验证：".to_string(),
+            parse_mode: None,
+            entities: None,
+            reply_parameters: None,
+            reply_markup: Some(ReplyMarkup::InlineKeyboard {
+                inline_keyboard: buttons,
+            }),
+        })
+        .await;
 }
 
 /// /status in private chat — check verification status.

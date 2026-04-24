@@ -10,6 +10,7 @@ binding = "WAIT_AUTH_KV"
 id = "fad766e0ebce4439974d64c5e1cc6b5b"
 
 [vars]
+BOT_USERNAME = "wit_sphinx_bot"
 
 
 [observability]
