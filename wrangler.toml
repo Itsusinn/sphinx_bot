@@ -1,0 +1,9 @@
+name = "sphinx-bot"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-04-24"
+
+[build]
+command = "cargo install worker-build && worker-build --release"
+
+# [vars]
+# TELEGRAM_BOT_TOKEN = "your-token-here"
