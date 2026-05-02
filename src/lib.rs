@@ -9,7 +9,11 @@ use turingram::types::{
     InlineKeyboardButton, InlineKeyboardButtonKind, MessageKind, ParseMode, ReplyMarkup, True,
     Update, UpdateKind,
 };
+mod auth_hub;
 mod durable;
+
+use auth_hub::AuthHub;
+use durable::UserWatchDO;
 
 use worker::*;
 
