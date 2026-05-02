@@ -13,5 +13,14 @@ id = "fad766e0ebce4439974d64c5e1cc6b5b"
 BOT_USERNAME = "wit_sphinx_bot"
 
 
+[[durable_objects.bindings]]
+name = "USER_WATCH_DO"
+class_name = "UserWatchDO"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["UserWatchDO"]
+
+
 [observability]
 logs = { enabled = false, invocation_logs = false }

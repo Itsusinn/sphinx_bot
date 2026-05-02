@@ -9,6 +9,8 @@ use turingram::types::{
     InlineKeyboardButton, InlineKeyboardButtonKind, MessageKind, ParseMode, ReplyMarkup, True,
     Update, UpdateKind,
 };
+mod durable;
+
 use worker::*;
 
 #[derive(Debug, Serialize)]
@@ -227,6 +229,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> worker::Resu
                         &kv,
                         &monitored_groups,
                         &bot_username,
+                        &env,
                     )
                     .await
                     {
@@ -403,6 +406,23 @@ async fn handle_text(
 }
 
 /// Handle service messages — detect new members.
+/// Schedule a Durable Object alarm to check the user after 2 minutes.
+async fn schedule_user_watch(env: &Env, chat_id: i64, user_id: i64) -> Result<()> {
+    let stub = env
+        .durable_object("USER_WATCH_DO")?
+        .id_from_name(&format!("watch_{}_{}", chat_id, user_id))?
+        .get_stub()?;
+
+    let url = format!(
+        "https://do/schedule?chat_id={}&user_id={}",
+        chat_id, user_id
+    );
+    let req = Request::new(&url, Method::Post)?;
+    stub.fetch_with_request(req).await?;
+    Ok(())
+}
+
+/// Handle service messages — detect new members.
 async fn handle_service_msg(
     bot: &Client<Executor>,
     chat_id: i64,
@@ -410,6 +430,7 @@ async fn handle_service_msg(
     kv: &KvStore,
     monitored: &HashSet<i64>,
     bot_username: &str,
+    env: &Env,
 ) -> Result<()> {
     if !monitored.contains(&chat_id) {
         return Ok(());
@@ -527,6 +548,16 @@ async fn handle_service_msg(
                 reply_markup: Some(markup),
             })
             .await?;
+
+        // Schedule alarm to check user after 2 minutes
+        if let Err(e) = schedule_user_watch(env, chat_id, user_id).await {
+            console_error!(
+                "Failed to schedule watch for user {} in group {}: {:?}",
+                user_id,
+                chat_id,
+                e
+            );
+        }
     }
     Ok(())
 }
