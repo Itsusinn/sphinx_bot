@@ -19,7 +19,7 @@ class_name = "UserWatchDO"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["UserWatchDO"]
+new_sqlite_classes = ["UserWatchDO"]
 
 
 [observability]
