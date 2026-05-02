@@ -198,7 +198,6 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> worker::Resu
     match update.kind {
         UpdateKind::Message(msg) => {
             let chat_id = msg.chat.id;
-            let msg_id = msg.id;
             let from_id = msg.from.as_ref().map(|u| u.id);
 
             match msg.kind {
@@ -207,10 +206,8 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> worker::Resu
                         &bot,
                         chat_id,
                         &text,
-                        msg_id,
                         from_id,
                         &env,
-                        &monitored_groups,
                         &questions,
                         &bot_username,
                     )
@@ -253,38 +250,11 @@ async fn handle_text(
     bot: &Client<Executor>,
     chat_id: i64,
     text: &str,
-    msg_id: u32,
     from_id: Option<i64>,
     env: &Env,
-    groups: &HashSet<i64>,
     questions: &[QuestionItem],
     bot_username: &str,
 ) -> Result<()> {
-    // If in a monitored group and sender is suspended, delete message and remove user
-    if groups.contains(&chat_id)
-        && let Some(uid) = from_id
-        && let Ok(member) = bot
-            .execute(GetChatMember {
-                chat_id,
-                user_id: uid,
-            })
-            .await
-        && member.get("tag").and_then(|t| t.as_str()).unwrap_or("") == "suspending"
-    {
-        bot.execute(DeleteMessage {
-            chat_id,
-            message_id: msg_id,
-        })
-        .await?;
-        let until = Date::now().as_millis() / 1000 + 7 * 24 * 3600;
-        bot.execute(BanChatMember {
-            chat_id,
-            user_id: uid,
-            until_date: Some(until),
-        })
-        .await?;
-        return Ok(());
-    }
 
     if text.starts_with('/') {
         let parts: Vec<&str> = text.split_whitespace().collect();
