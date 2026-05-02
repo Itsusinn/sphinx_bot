@@ -17,9 +17,17 @@ BOT_USERNAME = "wit_sphinx_bot"
 name = "USER_WATCH_DO"
 class_name = "UserWatchDO"
 
+[[durable_objects.bindings]]
+name = "AUTH_HUB"
+class_name = "AuthHub"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["UserWatchDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["AuthHub"]
 
 
 [observability]

@@ -156,13 +156,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> worker::Resu
         Err(_) => return Response::error("TELEGRAM_BOT_TOKEN missing", 500),
     };
 
-    let kv = match env.kv("WAIT_AUTH_KV") {
-        Ok(kv) => kv,
-        Err(e) => {
-            console_error!("KV binding error: {:?}", e);
-            return Response::error("WAIT_AUTH_KV binding missing", 500);
-        }
-    };
+    // WAIT_AUTH_KV is replaced by AuthHub Durable Object
 
     let monitored_groups: HashSet<i64> = match env.var("MONITORED_GROUPS") {
         Ok(v) => v
@@ -211,7 +205,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> worker::Resu
                         &text,
                         msg_id,
                         from_id,
-                        &kv,
+                        &env,
                         &monitored_groups,
                         &questions,
                         &bot_username,
@@ -226,7 +220,6 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> worker::Resu
                         &bot,
                         chat_id,
                         &raw,
-                        &kv,
                         &monitored_groups,
                         &bot_username,
                         &env,
@@ -239,7 +232,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> worker::Resu
             }
         }
         UpdateKind::CallbackQuery(query) => {
-            if let Err(e) = handle_callback(&bot, &query, &questions, &bot_username).await {
+            if let Err(e) = handle_callback(&bot, &query, &questions, &bot_username, &env).await {
                 console_error!("handle_callback error: {:?}", e);
             }
         }
@@ -258,7 +251,7 @@ async fn handle_text(
     text: &str,
     msg_id: u32,
     from_id: Option<i64>,
-    kv: &KvStore,
+    env: &Env,
     groups: &HashSet<i64>,
     questions: &[QuestionItem],
     bot_username: &str,
@@ -294,7 +287,7 @@ async fn handle_text(
         match parts[0] {
             "/start" => {
                 let payload = parts.get(1).copied();
-                handle_start(bot, chat_id, kv, payload, questions, bot_username).await?;
+                handle_start(bot, chat_id, env, payload, questions, bot_username).await?;
             }
             "/help" => {
                 bot.execute(SendMessage {
@@ -308,9 +301,9 @@ async fn handle_text(
                     })
                     .await?;
             }
-            "/verify" => handle_verify(bot, chat_id, kv, bot_username).await?,
+            "/verify" => handle_verify(bot, chat_id, env, bot_username).await?,
             "/chatid" => handle_chatid(bot, chat_id).await?,
-            "/status" => handle_status(bot, chat_id, kv).await?,
+            "/status" => handle_status(bot, chat_id, env).await?,
             "/unban" => {
                 if chat_id > 0 {
                     bot.execute(SendMessage {
@@ -405,6 +398,45 @@ async fn handle_text(
     Ok(())
 }
 
+/// AuthHub helpers — replaces WAIT_AUTH_KV.
+async fn auth_stub(env: &Env) -> anyhow::Result<Stub> {
+    Ok(env
+        .durable_object("AUTH_HUB")?
+        .id_from_name("global")?
+        .get_stub()?)
+}
+
+async fn auth_add_pending(env: &Env, user_id: i64, group_id: i64) -> anyhow::Result<()> {
+    let stub = auth_stub(env).await?;
+    let url = format!(
+        "https://do/add_pending?user_id={}&group_id={}",
+        user_id, group_id
+    );
+    let req = Request::new(&url, Method::Post)?;
+    stub.fetch_with_request(req).await?;
+    Ok(())
+}
+
+async fn auth_remove_pending(env: &Env, user_id: i64, group_id: i64) -> anyhow::Result<()> {
+    let stub = auth_stub(env).await?;
+    let url = format!(
+        "https://do/remove_pending?user_id={}&group_id={}",
+        user_id, group_id
+    );
+    let req = Request::new(&url, Method::Post)?;
+    stub.fetch_with_request(req).await?;
+    Ok(())
+}
+
+async fn auth_get_pending(env: &Env, user_id: i64) -> anyhow::Result<Vec<i64>> {
+    let stub = auth_stub(env).await?;
+    let url = format!("https://do/get_pending?user_id={}", user_id);
+    let req = Request::new(&url, Method::Get)?;
+    let mut resp = stub.fetch_with_request(req).await?;
+    let text = resp.text().await?;
+    Ok(serde_json::from_str(&text)?)
+}
+
 /// Handle service messages — detect new members.
 /// Schedule a Durable Object alarm to check the user after 2 minutes.
 async fn schedule_user_watch(
@@ -432,7 +464,6 @@ async fn handle_service_msg(
     bot: &Client<Executor>,
     chat_id: i64,
     raw: &Value,
-    kv: &KvStore,
     monitored: &HashSet<i64>,
     bot_username: &str,
     env: &Env,
@@ -474,23 +505,9 @@ async fn handle_service_msg(
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let now_ms = Date::now().as_millis();
-        let kv_key = format!("wait_auth:{}:{}", chat_id, user_id);
-        let kv_value = serde_json::json!({
-            "status": "pending",
-            "joined_at_ms": now_ms,
-            "first_name": first_name,
-            "username": username,
-        })
-        .to_string();
-
-        // Expire KV entry after 1 hour (3600 seconds)
-        if let Err(e) = kv
-            .put(&kv_key, kv_value.as_str())
-            .map(|b| b.expiration_ttl(3600))
-            .map(|b| b.execute())
-        {
-            console_error!("KV put error for {}: {:?}", kv_key, e);
+        // Register pending auth in AuthHub (replaces WAIT_AUTH_KV)
+        if let Err(e) = auth_add_pending(env, user_id, chat_id).await {
+            console_error!("auth_add_pending error for user {} in {}: {:?}", user_id, chat_id, e);
         }
 
         // Suspend new member — restrict all permissions and set tag
@@ -609,6 +626,7 @@ async fn handle_callback(
     query: &turingram::types::CallbackQuery,
     questions: &[QuestionItem],
     bot_username: &str,
+    env: &Env,
 ) -> Result<()> {
     let data = match &query.data {
         Some(d) => d,
@@ -645,6 +663,8 @@ async fn handle_callback(
         if let Some(q) = questions.get(q_idx) {
             if q.correct.contains(&opt_idx) {
                 verify_user(bot, group_id, user_id).await?;
+                // Clean up AuthHub pending entry
+                let _ = auth_remove_pending(env, user_id, group_id).await;
                 bot.execute(AnswerCallbackQuery {
                     callback_query_id: query.id.clone(),
                     text: Some("✅ 回答正确！验证成功！".to_string()),
@@ -845,7 +865,7 @@ async fn handle_callback(
 async fn handle_start(
     bot: &Client<Executor>,
     chat_id: i64,
-    kv: &KvStore,
+    env: &Env,
     payload: Option<&str>,
     questions: &[QuestionItem],
     bot_username: &str,
@@ -943,22 +963,10 @@ async fn handle_start(
         return Ok(());
     }
 
-    // Check for pending verifications
-    let prefix = "wait_auth:";
-    let pending_keys: Vec<String> = match kv.list().prefix(prefix.to_string()).execute().await {
-        Ok(r) => r
-            .keys
-            .iter()
-            .filter(|k| {
-                let parts: Vec<&str> = k.name.split(':').collect();
-                parts.len() == 3 && parts[2] == chat_id.to_string()
-            })
-            .map(|k| k.name.clone())
-            .collect(),
-        Err(_) => Vec::new(),
-    };
+    // Check for pending verifications via AuthHub
+    let pending_groups = auth_get_pending(env, chat_id).await.unwrap_or_default();
 
-    if pending_keys.is_empty() {
+    if pending_groups.is_empty() {
         bot.execute(SendMessage {
                 chat_id,
                 text: "👋 你好！我是 Sphinx Bot。\n\n如果你刚刚加入了某个受监控的群组，请点击群组内的验证按钮，然后在此私聊中完成验证。\n\n发送 /help 查看帮助。"
@@ -974,16 +982,13 @@ async fn handle_start(
 
     // Build verification buttons for each pending group
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
-    for key in &pending_keys {
-        let parts: Vec<&str> = key.split(':').collect();
-        if let Some(gid) = parts.get(1) {
-            buttons.push(vec![InlineKeyboardButton {
-                text: format!("✅ 验证群组 {}", gid),
-                kind: InlineKeyboardButtonKind::Url {
-                    url: format!("https://t.me/{}?start=verify_{}", bot_username, gid),
-                },
-            }]);
-        }
+    for &gid in &pending_groups {
+        buttons.push(vec![InlineKeyboardButton {
+            text: format!("✅ 验证群组 {}", gid),
+            kind: InlineKeyboardButtonKind::Url {
+                url: format!("https://t.me/{}?start=verify_{}", bot_username, gid),
+            },
+        }]);
     }
 
     let markup = ReplyMarkup::InlineKeyboard {
@@ -1028,43 +1033,13 @@ async fn handle_chatid(bot: &Client<Executor>, chat_id: i64) -> Result<()> {
 async fn handle_verify(
     bot: &Client<Executor>,
     chat_id: i64,
-    kv: &KvStore,
+    env: &Env,
     bot_username: &str,
 ) -> Result<()> {
-    // Check all wait_auth entries for this user across groups
-    // We need to list KV with prefix
-    let prefix = "wait_auth:".to_string();
+    // Check pending verifications via AuthHub
+    let pending_groups = auth_get_pending(env, chat_id).await.unwrap_or_default();
 
-    let list_resp = match kv.list().prefix(prefix.clone()).execute().await {
-        Ok(r) => r,
-        Err(e) => {
-            console_error!("KV list error: {:?}", e);
-            bot.execute(SendMessage {
-                chat_id,
-                text: "❌ 系统错误，请稍后再试。".to_string(),
-                parse_mode: None,
-                entities: None,
-                reply_parameters: None,
-                reply_markup: None,
-            })
-            .await?;
-            return Ok(());
-        }
-    };
-
-    // Filter to find entries for this user
-    let pending_entries: Vec<&str> = list_resp
-        .keys
-        .iter()
-        .filter(|k| {
-            // key format: wait_auth:{group_id}:{user_id}
-            let parts: Vec<&str> = k.name.split(':').collect();
-            parts.len() == 3 && parts[0] == "wait_auth" && parts[2] == chat_id.to_string()
-        })
-        .map(|k| k.name.as_str())
-        .collect();
-
-    if pending_entries.is_empty() {
+    if pending_groups.is_empty() {
         bot.execute(SendMessage {
             chat_id,
             text: "📭 没有待处理的验证请求。\n\n如果你刚加入群组，请点击群组内的验证按钮。"
@@ -1079,11 +1054,7 @@ async fn handle_verify(
     }
 
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
-    for key in &pending_entries {
-        let parts: Vec<&str> = key.split(':').collect();
-        let group_id = parts[1];
-
-        // Instead of verifying immediately, provide a button to trigger the start flow with questions
+    for &group_id in &pending_groups {
         buttons.push(vec![InlineKeyboardButton {
             text: format!("✅ 去验证群组 {}", group_id),
             kind: InlineKeyboardButtonKind::Url {
@@ -1107,27 +1078,11 @@ async fn handle_verify(
 }
 
 /// /status in private chat — check verification status.
-async fn handle_status(bot: &Client<Executor>, chat_id: i64, kv: &KvStore) -> Result<()> {
-    let prefix = "wait_auth:";
-    let list_resp = match kv.list().prefix(prefix.to_string()).execute().await {
-        Ok(r) => r,
-        Err(e) => {
-            console_error!("KV list error: {:?}", e);
-            return Ok(());
-        }
-    };
+async fn handle_status(bot: &Client<Executor>, chat_id: i64, env: &Env) -> Result<()> {
+    // Fetch pending groups via AuthHub
+    let pending_groups = auth_get_pending(env, chat_id).await.unwrap_or_default();
 
-    let user_entries: Vec<String> = list_resp
-        .keys
-        .iter()
-        .filter(|k| {
-            let parts: Vec<&str> = k.name.split(':').collect();
-            parts.len() == 3 && parts[2] == chat_id.to_string()
-        })
-        .map(|k| k.name.clone())
-        .collect();
-
-    if user_entries.is_empty() {
+    if pending_groups.is_empty() {
         bot.execute(SendMessage {
             chat_id,
             text: "📭 没有相关验证记录。".to_string(),
@@ -1141,18 +1096,8 @@ async fn handle_status(bot: &Client<Executor>, chat_id: i64, kv: &KvStore) -> Re
     }
 
     let mut lines = vec!["📋 你的验证状态：".to_string()];
-    for key in &user_entries {
-        let parts: Vec<&str> = key.split(':').collect();
-        let gid = parts.get(1).unwrap_or(&"?");
-
-        if let Ok(Some(val)) = kv.get(key).text().await {
-            let status = if val.contains("\"verified\"") {
-                "✅ 已验证"
-            } else {
-                "⏳ 待验证"
-            };
-            lines.push(format!("  • 群组 {} → {}", gid, status));
-        }
+    for &gid in &pending_groups {
+        lines.push(format!("  • 群组 {} → ⏳ 待验证", gid));
     }
 
     bot.execute(SendMessage {
