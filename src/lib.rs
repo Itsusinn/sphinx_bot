@@ -174,7 +174,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> worker::Resu
         }
     };
 
-    let bot_username = match env.var("BOT_USERNAME") {
+    let bot_username = match env.secret("BOT_USERNAME") {
         Ok(v) => v.to_string(),
         Err(_) => return Response::error("BOT_USERNAME missing", 500),
     };

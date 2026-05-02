@@ -5,10 +5,6 @@ compatibility_date = "2024-04-24"
 [build]
 command = "cargo install worker-build && worker-build --release"
 
-[vars]
-BOT_USERNAME = "wit_sphinx_bot"
-
-
 [[durable_objects.bindings]]
 name = "USER_WATCH_DO"
 class_name = "UserWatchDO"
