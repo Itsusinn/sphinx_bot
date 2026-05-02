@@ -160,7 +160,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> worker::Resu
         Err(_) => return Response::error("TELEGRAM_BOT_TOKEN missing", 500),
     };
 
-    // WAIT_AUTH_KV is replaced by AuthHub Durable Object
+
 
     let monitored_groups: HashSet<i64> = match env.var("MONITORED_GROUPS") {
         Ok(v) => v
@@ -402,7 +402,7 @@ async fn handle_text(
     Ok(())
 }
 
-/// AuthHub helpers — replaces WAIT_AUTH_KV.
+/// AuthHub helpers.
 async fn auth_stub(env: &Env) -> anyhow::Result<Stub> {
     Ok(env
         .durable_object("AUTH_HUB")?
@@ -509,7 +509,7 @@ async fn handle_service_msg(
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        // Register pending auth in AuthHub (replaces WAIT_AUTH_KV)
+        // Register pending auth in AuthHub
         if let Err(e) = auth_add_pending(env, user_id, chat_id).await {
             console_error!("auth_add_pending error for user {} in {}: {:?}", user_id, chat_id, e);
         }

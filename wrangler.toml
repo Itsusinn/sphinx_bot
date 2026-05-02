@@ -5,10 +5,6 @@ compatibility_date = "2024-04-24"
 [build]
 command = "cargo install worker-build && worker-build --release"
 
-[[kv_namespaces]]
-binding = "WAIT_AUTH_KV"
-id = "fad766e0ebce4439974d64c5e1cc6b5b"
-
 [vars]
 BOT_USERNAME = "wit_sphinx_bot"
 
