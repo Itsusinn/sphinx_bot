@@ -12,7 +12,10 @@ use turingram::types::{
 mod auth_hub;
 mod durable;
 
+// Keep these alive for wasm-bindgen Durable Object exports
+#[allow(unused_imports)]
 use auth_hub::AuthHub;
+#[allow(unused_imports)]
 use durable::UserWatchDO;
 
 use worker::*;
