@@ -407,15 +407,20 @@ async fn handle_text(
 
 /// Handle service messages — detect new members.
 /// Schedule a Durable Object alarm to check the user after 2 minutes.
-async fn schedule_user_watch(env: &Env, chat_id: i64, user_id: i64) -> Result<()> {
+async fn schedule_user_watch(
+    env: &Env,
+    chat_id: i64,
+    user_id: i64,
+    msg_id: u32,
+) -> Result<()> {
     let stub = env
         .durable_object("USER_WATCH_DO")?
         .id_from_name(&format!("watch_{}_{}", chat_id, user_id))?
         .get_stub()?;
 
     let url = format!(
-        "https://do/schedule?chat_id={}&user_id={}",
-        chat_id, user_id
+        "https://do/schedule?chat_id={}&user_id={}&msg_id={}",
+        chat_id, user_id, msg_id
     );
     let req = Request::new(&url, Method::Post)?;
     stub.fetch_with_request(req).await?;
@@ -536,7 +541,8 @@ async fn handle_service_msg(
             inline_keyboard: vec![vec![button]],
         };
 
-        bot.execute(SendMessage {
+        let welcome_msg = bot
+            .execute(SendMessage {
                 chat_id,
                 text: format!(
                     "👋 欢迎 {} 加入群组！\n\n请点击下方按钮进行身份验证。\nWelcome! Please verify your identity.",
@@ -550,7 +556,7 @@ async fn handle_service_msg(
             .await?;
 
         // Schedule alarm to check user after 2 minutes
-        if let Err(e) = schedule_user_watch(env, chat_id, user_id).await {
+        if let Err(e) = schedule_user_watch(env, chat_id, user_id, welcome_msg.id).await {
             console_error!(
                 "Failed to schedule watch for user {} in group {}: {:?}",
                 user_id,

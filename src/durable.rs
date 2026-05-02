@@ -3,7 +3,7 @@ use std::time::Duration;
 use turingram::client::{Client, worker_0_8::Executor};
 use worker::*;
 
-use crate::{BanChatMember, GetChatMember, SetChatMemberTag};
+use crate::{BanChatMember, DeleteMessage, GetChatMember, SetChatMemberTag};
 
 /// Durable Object that watches a user after joining a group.
 /// Sets an alarm for 2 minutes later. When the alarm fires,
@@ -33,6 +33,11 @@ impl DurableObject for UserWatchDO {
             .find(|(k, _)| k == "user_id")
             .and_then(|(_, v)| v.parse().ok())
             .unwrap_or(0);
+        let msg_id: u32 = url
+            .query_pairs()
+            .find(|(k, _)| k == "msg_id")
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(0);
 
         if chat_id == 0 || user_id == 0 {
             return Response::error("chat_id and user_id required", 400);
@@ -40,6 +45,7 @@ impl DurableObject for UserWatchDO {
 
         self.state.storage().put("chat_id", chat_id).await?;
         self.state.storage().put("user_id", user_id).await?;
+        self.state.storage().put("msg_id", msg_id).await?;
 
         // Set alarm for 2 minutes from now
         self.state.storage().set_alarm(Duration::from_secs(120)).await?;
@@ -56,6 +62,7 @@ impl DurableObject for UserWatchDO {
     async fn alarm(&self) -> Result<Response> {
         let chat_id: i64 = self.state.storage().get("chat_id").await?.unwrap_or(0);
         let user_id: i64 = self.state.storage().get("user_id").await?.unwrap_or(0);
+        let msg_id: u32 = self.state.storage().get("msg_id").await?.unwrap_or(0);
 
         if chat_id == 0 || user_id == 0 {
             console_log!("UserWatchDO: no target stored, skipping");
@@ -91,7 +98,7 @@ impl DurableObject for UserWatchDO {
             let now_ms = Date::now().as_millis() as u64;
             let until = now_ms / 1000 + 7 * 24 * 3600;
 
-            // Clear tag first, then ban
+            // Clear tag first
             let _ = bot
                 .execute(SetChatMemberTag {
                     chat_id,
@@ -100,6 +107,25 @@ impl DurableObject for UserWatchDO {
                 })
                 .await;
 
+            // Delete welcome message
+            if msg_id > 0 {
+                if let Err(e) = bot
+                    .execute(DeleteMessage {
+                        chat_id,
+                        message_id: msg_id,
+                    })
+                    .await
+                {
+                    console_error!(
+                        "UserWatchDO: failed to delete welcome msg for user {} in {}: {:?}",
+                        user_id,
+                        chat_id,
+                        e
+                    );
+                }
+            }
+
+            // Ban for 1 week
             if let Err(e) = bot
                 .execute(BanChatMember {
                     chat_id,
